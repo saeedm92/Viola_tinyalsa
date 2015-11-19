@@ -47,6 +47,7 @@
 #include <sound/asound.h>
 
 #include <tinyalsa/asoundlib.h>
+#include <utils/Viola.h>
 
 #define PARAM_MAX SNDRV_PCM_HW_PARAM_LAST_INTERVAL
 #define SNDRV_PCM_HW_PARAMS_NO_PERIOD_WAKEUP (1<<2)
@@ -437,6 +438,80 @@ static struct pcm bad_pcm = {
     .fd = -1,
 };
 
+#include "leds-an30259a.h"
+
+char const *const LED_FILE = "/dev/an30259a_leds";
+
+#define IMAX 3 // 12.75mA power consumption
+#define SLOPE_UP_1		0//450
+#define SLOPE_UP_2		0//(500-SLOPE_UP_1)
+#define SLOPE_DOWN_1	SLOPE_UP_2
+#define SLOPE_DOWN_2	SLOPE_UP_1
+// brightness at mid-slope, on 0 - 127 scale
+#define MID_BRIGHTNESS  31
+
+/* LEDs */
+static int write_leds(struct an30259a_pr_control *led)
+{
+	int err = 0;
+	int imax = IMAX;
+	int fd;
+
+	fd = open(LED_FILE, O_RDWR);
+	if (fd >= 0) {
+		err = ioctl(fd, AN30259A_PR_SET_IMAX, &imax);
+		if (err)
+			EASYLOG0("failed to set imax");
+
+		err = ioctl(fd, AN30259A_PR_SET_LED, led);
+		if (err < 0)
+			EASYLOG0("failed to set leds!");
+
+		close(fd);
+	} else {
+		EASYLOG0("failed to open %s!", LED_FILE);
+		err =  -errno;
+	}
+
+	return err;
+}
+
+void turn_on_mic_led(void)
+{
+	struct an30259a_pr_control led;
+	int flashOnMS = 500;
+	int flashOffMS = 500;
+
+	memset(&led, 0, sizeof(led));
+
+	led.state = LED_LIGHT_SLOPE;
+
+	led.color = 0xff0000;
+	// scale slope times based on flashOnMS
+	led.time_slope_up_1 = (SLOPE_UP_1 * flashOnMS) / 1000;
+	led.time_slope_up_2 = (SLOPE_UP_2 * flashOnMS) / 1000;
+	led.time_slope_down_1 = (SLOPE_DOWN_1 * flashOnMS) / 1000;
+	led.time_slope_down_2 = (SLOPE_DOWN_2 * flashOnMS) / 1000;
+	led.mid_brightness = MID_BRIGHTNESS;
+	led.time_off = flashOffMS;
+	led.time_on = flashOnMS;
+
+	write_leds(&led);
+}
+
+void turn_off_mic_led(void)
+{
+	struct an30259a_pr_control led;
+
+	memset(&led, 0, sizeof(led));
+
+	led.state = LED_LIGHT_OFF;
+	led.color = 0x000000;
+	led.mid_brightness = MID_BRIGHTNESS; //what is this?
+
+	write_leds(&led);
+}
+
 int pcm_close(struct pcm *pcm)
 {
     if (pcm == &bad_pcm)
@@ -454,6 +529,8 @@ int pcm_close(struct pcm *pcm)
     pcm->running = 0;
     pcm->buffer_size = 0;
     pcm->fd = -1;
+    if (pcm->flags & PCM_IN)
+	    turn_off_mic_led();
     free(pcm);
     return 0;
 }
@@ -478,9 +555,13 @@ struct pcm *pcm_open(unsigned int card, unsigned int device,
              flags & PCM_IN ? 'c' : 'p');
 
     pcm->flags = flags;
+    if (flags & PCM_IN)
+	    turn_on_mic_led();
     pcm->fd = open(fn, O_RDWR);
     if (pcm->fd < 0) {
         oops(pcm, errno, "cannot open device '%s'", fn);
+        if (flags & PCM_IN)
+		turn_off_mic_led();
         return pcm;
     }
 
@@ -602,6 +683,8 @@ fail:
     if (flags & PCM_MMAP)
         munmap(pcm->mmap_buffer, pcm_frames_to_bytes(pcm, pcm->buffer_size));
 fail_close:
+    if (flags & PCM_IN)
+	    turn_off_mic_led();
     close(pcm->fd);
     pcm->fd = -1;
     return pcm;
